@@ -8,13 +8,12 @@ const ADMINS = process.env.ADMINS ? process.env.ADMINS.split(",").map(Number) : 
 const GROUP_CHAT_ID = process.env.GROUP_CHAT_ID?.replace(/['"]/g, "");
 
 const userLangs = {};
+const userSessions = {};
 
-// ─── Helper: get user language ───
 function getUserLang(telegramId) {
   return userLangs[telegramId] || "en";
 }
 
-// ─── Helper: show main menu with inline buttons ───
 async function showMainMenu(ctx, lang) {
   await ctx.reply(t(lang, "mainMenu"), {
     ...Markup.inlineKeyboard([
@@ -24,9 +23,12 @@ async function showMainMenu(ctx, lang) {
   });
 }
 
-// ═══════════════════════════════════════════
-// 🌍 /start — Welcome intro + language select
-// ═══════════════════════════════════════════
+function cancelKeyboard(lang) {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback(t(lang, "btnCancel"), "cancel_post")],
+  ]);
+}
+
 bot.start(async (ctx) => {
   const lang = getUserLang(ctx.from.id);
   const welcome = t(lang, "welcome");
@@ -36,17 +38,11 @@ bot.start(async (ctx) => {
   });
 });
 
-// ═══════════════════════════════════════════
-// 📋 /menu — Re-access main menu anytime
-// ═══════════════════════════════════════════
 bot.command("menu", async (ctx) => {
   const lang = getUserLang(ctx.from.id);
   await showMainMenu(ctx, lang);
 });
 
-// ═══════════════════════════════════════════
-// 🌍 Language selection → save + show menu
-// ═══════════════════════════════════════════
 bot.hears(["English", "አማርኛ", "العربية"], async (ctx) => {
   const langMap = {
     English: "en",
@@ -61,88 +57,115 @@ bot.hears(["English", "አማርኛ", "العربية"], async (ctx) => {
     reply_markup: { remove_keyboard: true },
   });
 
-  // Show main menu after language is set
   await showMainMenu(ctx, lang);
 });
 
-// ═══════════════════════════════════════════
-// 📦 Post Product — Send posting instructions
-// ═══════════════════════════════════════════
 bot.action("post_product", async (ctx) => {
-  try {
-    await ctx.answerCbQuery();
-  } catch (e) {}
+  try { await ctx.answerCbQuery(); } catch (e) {}
   const lang = getUserLang(ctx.from.id);
+
+  userSessions[ctx.from.id] = { step: "photo" };
+
   await ctx.reply(t(lang, "postInstructions"));
+  await ctx.reply(t(lang, "promptPhoto"), cancelKeyboard(lang));
 });
 
-// ═══════════════════════════════════════════
-// 📞 Contact Us — Send beautified contact info
-// ═══════════════════════════════════════════
+bot.action("cancel_post", async (ctx) => {
+  try { await ctx.answerCbQuery(); } catch (e) {}
+  const lang = getUserLang(ctx.from.id);
+
+  delete userSessions[ctx.from.id];
+
+  await ctx.reply("❌ Canceled.");
+  await showMainMenu(ctx, lang);
+});
+
 bot.action("contact_us", async (ctx) => {
-  try {
-    await ctx.answerCbQuery();
-  } catch (e) {}
+  try { await ctx.answerCbQuery(); } catch (e) {}
   const lang = getUserLang(ctx.from.id);
   await ctx.reply(t(lang, "contactInfo"));
 });
 
-// ═══════════════════════════════════════════
-// 💬 Admin reply in group → relay to user
-// ═══════════════════════════════════════════
+bot.on("photo", async (ctx) => {
+  const session = userSessions[ctx.from.id];
+  const lang = getUserLang(ctx.from.id);
+
+  if (session && session.step === "photo") {
+    session.photo = ctx.message.photo.pop().file_id;
+    session.step = "name";
+    return ctx.reply(t(lang, "promptName"), cancelKeyboard(lang));
+  }
+});
+
 bot.on("message", async (ctx) => {
-  // ── Handle admin replies in the group ──
+  const session = userSessions[ctx.from.id];
+  const lang = getUserLang(ctx.from.id);
+
   if (
     ctx.chat.id.toString() === GROUP_CHAT_ID?.toString() &&
     ctx.message.reply_to_message
   ) {
     const repliedText = ctx.message.reply_to_message.text || ctx.message.reply_to_message.caption || "";
-    
-    // Extract user ID from the forwarded header
     const match = repliedText.match(/🆔 ID:\s*(\d+)/);
+
     if (match) {
       const userId = Number(match[1]);
       try {
-        // Forward admin's reply to the user
-        if (ctx.message.text) {
-          await ctx.telegram.sendMessage(userId, ctx.message.text);
-        } else if (ctx.message.photo) {
-          const photo = ctx.message.photo.pop().file_id;
-          await ctx.telegram.sendPhoto(userId, photo, {
-            caption: ctx.message.caption || "",
-          });
-        } else if (ctx.message.document) {
-          await ctx.telegram.sendDocument(userId, ctx.message.document.file_id, {
-            caption: ctx.message.caption || "",
-          });
-        } else if (ctx.message.video) {
-          await ctx.telegram.sendVideo(userId, ctx.message.video.file_id, {
-            caption: ctx.message.caption || "",
-          });
-        } else if (ctx.message.voice) {
-          await ctx.telegram.sendVoice(userId, ctx.message.voice.file_id);
-        } else if (ctx.message.sticker) {
-          await ctx.telegram.sendSticker(userId, ctx.message.sticker.file_id);
-        }
+        await ctx.copyMessage(userId);
       } catch (err) {
         console.error("Error relaying message to user:", err.message);
-        ctx.reply("❌ Could not send message to the user. They may have blocked the bot.");
+        ctx.reply("Could not send message to the user.");
       }
     }
     return;
   }
 
-  // ── Regular user: forward messages to admin group ──
-  if (ctx.chat.type === "private" && !ADMINS.includes(ctx.from.id)) {
-    await forwardToGroup(ctx);
+  if (ctx.chat.type === "private" && session && session.step !== "photo") {
+    const text = ctx.message.text;
+    if (!text) return;
+
+    switch (session.step) {
+      case "name":
+        session.name = text;
+        session.step = "price";
+        return ctx.reply(t(lang, "promptPrice"), cancelKeyboard(lang));
+
+      case "price":
+        session.price = text;
+        session.step = "location";
+        return ctx.reply(t(lang, "promptLocation"), cancelKeyboard(lang));
+
+      case "location":
+        session.location = text;
+        session.step = "condition";
+        return ctx.reply(t(lang, "promptCondition"), cancelKeyboard(lang));
+
+      case "condition":
+        session.condition = text;
+        session.step = "size";
+        return ctx.reply(t(lang, "promptSize"), cancelKeyboard(lang));
+
+      case "size":
+        session.size = text;
+        session.step = "description";
+        return ctx.reply(t(lang, "promptDescription"), cancelKeyboard(lang));
+
+      case "description":
+        session.description = text;
+        session.step = "phone";
+        return ctx.reply(t(lang, "promptPhone"), cancelKeyboard(lang));
+
+      case "phone":
+        session.phone = text;
+        await submitProduct(ctx, session, lang);
+        delete userSessions[ctx.from.id];
+        return;
+    }
   }
 });
 
-// ═══════════════════════════════════════════
-// 📤 Forward user message to admin group
-// ═══════════════════════════════════════════
-async function forwardToGroup(ctx) {
-  if (!GROUP_CHAT_ID || GROUP_CHAT_ID === "YOUR_GROUP_CHAT_ID_HERE") {
+async function submitProduct(ctx, session, lang) {
+  if (!GROUP_CHAT_ID) {
     console.error("GROUP_CHAT_ID is not configured.");
     return;
   }
@@ -150,43 +173,33 @@ async function forwardToGroup(ctx) {
   const user = ctx.from;
   const username = user.username ? `@${user.username}` : "N/A";
   const name = [user.first_name, user.last_name].filter(Boolean).join(" ");
-  const lang = getUserLang(user.id);
 
-  const header =
-    `━━━━━━━━━━━━━━━━━━━━\n` +
-    `📩 New message from user\n` +
-    `━━━━━━━━━━━━━━━━━━━━\n` +
-    `👤 Name: ${name}\n` +
-    `🆔 ID: ${user.id}\n` +
-    `📎 Username: ${username}\n` +
-    `🌍 Language: ${lang}\n` +
-    `━━━━━━━━━━━━━━━━━━━━`;
+  const caption = [
+    `━━━━━━━━━━━━━━━━━━━━`,
+    `📦  NEW PRODUCT POST  📦`,
+    `━━━━━━━━━━━━━━━━━━━━`,
+    `${t(lang, "labelName")}: ${session.name}`,
+    `${t(lang, "labelPrice")}: ${session.price}`,
+    `${t(lang, "labelLocation")}: ${session.location}`,
+    `${t(lang, "labelCondition")}: ${session.condition}`,
+    `${t(lang, "labelSize")}: ${session.size}`,
+    `${t(lang, "labelDescription")}: ${session.description}`,
+    `${t(lang, "labelPhone")}: ${session.phone}`,
+    `━━━━━━━━━━━━━━━━━━━━`,
+    `${t(lang, "labelUser")}: ${name} (${username})`,
+    `🆔 ID: ${user.id}`,
+    `🌍 Language: ${lang}`,
+    `━━━━━━━━━━━━━━━━━━━━`,
+  ].join("\n");
 
   try {
-    // Send user info header
-    await ctx.telegram.sendMessage(GROUP_CHAT_ID, header);
-
-    // Forward the actual message instead of copying to preserve media groups/etc if possible
-    // Use copyMessage for better reliability with different types
-    await ctx.copyMessage(GROUP_CHAT_ID);
-
-    // Confirm to the user
-    await ctx.reply(t(lang, "msgForwarded"));
+    await ctx.telegram.sendPhoto(GROUP_CHAT_ID, session.photo, { caption });
+    await ctx.reply(t(lang, "postSuccess"));
+    await showMainMenu(ctx, lang);
   } catch (err) {
-    console.error("Error forwarding to group:", err.message);
-    if (err.description?.includes("chat not found")) {
-      console.error("TIP: Make sure the bot is a member of the group and GROUP_CHAT_ID is correct.");
-    }
+    console.error("Error submitting product to group:", err.message);
+    ctx.reply("❌ Error sending your post to admins. Please try again later.");
   }
 }
 
-// 🚀 Launch
-bot.launch().then(() => {
-  console.log("Bot running 🚀");
-}).catch(err => {
-  console.error("Bot launch error:", err.message);
-});
-
-// Graceful stop
-process.once("SIGINT", () => bot.stop("SIGINT"));
-process.once("SIGTERM", () => bot.stop("SIGTERM"));
+module.exports = bot;
