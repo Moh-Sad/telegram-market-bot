@@ -1,6 +1,6 @@
 require("dotenv").config();
 const { Telegraf, Markup } = require("telegraf");
-const { t } = require("./utils/lang");
+const { t } = require("../utils/lang");
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
@@ -114,7 +114,7 @@ bot.on("message", async (ctx) => {
         await ctx.copyMessage(userId);
       } catch (err) {
         console.error("Error relaying message to user:", err.message);
-        ctx.reply("❌ Could not send message to the user.");
+        ctx.reply("Could not send message to the user.");
       }
     }
     return;
