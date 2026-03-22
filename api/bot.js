@@ -1,4 +1,4 @@
-require("dotenv").config();
+Srequire("dotenv").config();
 const { Telegraf, Markup } = require("telegraf");
 const { t } = require("../utils/lang");
 
